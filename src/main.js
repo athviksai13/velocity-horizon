@@ -411,7 +411,7 @@ function createCar(bodyColor) {
 }
 
 const car = createCar(0xff0000)
-car.position.set(trackControlPoints[0].x, 0, trackControlPoints[0].z)
+car.position.set(trackControlPoints[0].x, 0, trackControlPoints[0].z+15)
 scene.add(car)
 
 camera.position.set(trackControlPoints[0].x, 5, trackControlPoints[0].z - 10)
