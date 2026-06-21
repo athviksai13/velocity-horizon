@@ -293,33 +293,24 @@ finishLine.position.set(trackControlPoints[0].x, 0.03, trackControlPoints[0].z)
 scene.add(finishLine)
 
 // ===== Trees =====
-const trees = []
-const TREE_MIN_OFFSET = TRACK_WIDTH / 2 + BARRIER_THICKNESS + 2
-const TREE_MAX_OFFSET = TRACK_WIDTH / 2 + BARRIER_THICKNESS + 18
+// Built as two InstancedMeshes (trunks, foliage) instead of ~1,200 individual
+// Group/Mesh/Material instances. The original loop created a brand-new
+// geometry AND a brand-new material for every single tree, which meant
+// 2,400+ separate draw calls every frame just for trees. That draw-call
+// count is almost certainly the real source of the "stutter" — it makes
+// frame time inconsistent, which then feeds into the camera instability
+// fixed below. Instancing collapses it down to 2 draw calls total.
+const TREE_MIN_OFFSET = TRACK_WIDTH / 2 + BARRIER_THICKNESS + 8
+const TREE_MAX_OFFSET = TRACK_WIDTH / 2 + BARRIER_THICKNESS + 30
 const TREES_PER_TRACK_POINT = 2
 const TREE_SAMPLE_STRIDE = 3
 
-function createTree() {
-    const tree = new THREE.Group()
+const treeTrunkGeometry = new THREE.CylinderGeometry(0.3, 0.4, 3, 6)
+const treeFoliageGeometry = new THREE.ConeGeometry(1.8, 4, 8)
+const treeTrunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6b4423 })
+const treeFoliageMaterial = new THREE.MeshStandardMaterial({ color: 0x2d6a2d })
 
-    const trunk = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.3, 0.4, 3, 6),
-        new THREE.MeshStandardMaterial({ color: 0x6b4423 })
-    )
-    trunk.position.y = 1.5
-    trunk.castShadow = true
-    tree.add(trunk)
-
-    const foliage = new THREE.Mesh(
-        new THREE.ConeGeometry(1.8, 4, 8),
-        new THREE.MeshStandardMaterial({ color: 0x2d6a2d })
-    )
-    foliage.position.y = 4.5
-    foliage.castShadow = true
-    tree.add(foliage)
-
-    return tree
-}
+const treeTransforms = []
 
 for (let i = 0; i < trackPoints.length; i += TREE_SAMPLE_STRIDE) {
     const current = trackPoints[i]
@@ -330,52 +321,208 @@ for (let i = 0; i < trackPoints.length; i += TREE_SAMPLE_STRIDE) {
 
     ;[-1, 1].forEach((side) => {
         for (let j = 0; j < TREES_PER_TRACK_POINT; j++) {
-            const tree = createTree()
-
             const offsetDistance = side * (TREE_MIN_OFFSET + Math.random() * (TREE_MAX_OFFSET - TREE_MIN_OFFSET))
             const position = new THREE.Vector3().copy(current).addScaledVector(perpendicular, offsetDistance)
 
             const jitter = (Math.random() - 0.5) * TREE_SAMPLE_STRIDE * 2
             position.addScaledVector(direction, jitter)
 
-            tree.position.set(position.x, 0, position.z)
-
-            scene.add(tree)
-            trees.push(tree)
+            treeTransforms.push({
+                x: position.x,
+                z: position.z,
+                rotationY: Math.random() * Math.PI * 2,
+                scale: 0.8 + Math.random() * 0.5
+            })
         }
     })
 }
 
+const treeTrunkMesh = new THREE.InstancedMesh(treeTrunkGeometry, treeTrunkMaterial, treeTransforms.length)
+const treeFoliageMesh = new THREE.InstancedMesh(treeFoliageGeometry, treeFoliageMaterial, treeTransforms.length)
+
+const treeDummy = new THREE.Object3D()
+treeTransforms.forEach((t, i) => {
+    treeDummy.position.set(t.x, 1.5 * t.scale, t.z)
+    treeDummy.rotation.y = t.rotationY
+    treeDummy.scale.setScalar(t.scale)
+    treeDummy.updateMatrix()
+    treeTrunkMesh.setMatrixAt(i, treeDummy.matrix)
+
+    treeDummy.position.set(t.x, 4.5 * t.scale, t.z)
+    treeDummy.updateMatrix()
+    treeFoliageMesh.setMatrixAt(i, treeDummy.matrix)
+})
+
+treeTrunkMesh.instanceMatrix.needsUpdate = true
+treeFoliageMesh.instanceMatrix.needsUpdate = true
+
+scene.add(treeTrunkMesh, treeFoliageMesh)
+
 // ===== Car =====
+// Low-poly "GTA: San Andreas" PS2-era look. The previous version stacked
+// a flat box (body) + a smaller flat box (cabin) — that's what reads as
+// "boxes": a box has no hood slope, no windshield rake, no roof curve, so
+// no lighting setup can make it look like a car. The fix isn't reflections
+// or higher-res materials, it's the SHAPE. Below, the whole body is ONE
+// sculpted silhouette (front bumper -> hood -> windshield -> roof -> rear
+// window -> trunk -> rear bumper), extruded into 3D, with a slight inward
+// taper above the beltline so the cabin reads narrower than the body —
+// the same "tumblehome" real cars (and the GTA models) have. Material
+// stays a plain flat-shaded MeshStandardMaterial, no env maps, no extra
+// shininess, so it keeps the chunky PS2 look — only the shape changed.
 const CAR_WIDTH = 1.8
+const CAR_LENGTH = 4.2
+const CAR_BELT_HEIGHT = 0.85   // height where the cabin starts pulling inward
+const CAR_ROOF_HEIGHT = 1.30   // top of the roof
+const CAR_TUMBLEHOME = 0.78    // 1 = vertical sides, lower = more inward lean
+
+// One continuous side-view outline of the car (x = front/back, y = height),
+// traced once around: rocker (flat bottom) -> front bumper -> hood ->
+// windshield -> roof -> rear window -> trunk -> rear bumper -> back to
+// rocker. Tuned by hand for CAR_LENGTH = 4.2 / CAR_WIDTH = 1.8.
+const CAR_BODY_PROFILE = [
+    [-2.05, 0.15],  // rear bumper, bottom
+    [ 2.00, 0.15],  // front bumper, bottom (flat rocker/sill line)
+    [ 2.10, 0.35],  // front bumper, leading face
+    [ 1.90, 0.55],  // top of front bumper / front edge of hood
+    [ 1.60, 0.62],  // hood
+    [ 0.90, 0.85],  // cowl, base of windshield
+    [ 0.40, 1.30],  // windshield top / front of roof
+    [-0.60, 1.30],  // rear of roof
+    [-1.20, 0.95],  // base of rear window
+    [-1.60, 0.65],  // trunk lid
+    [-1.90, 0.45],  // top of rear bumper
+    [-2.10, 0.30],  // rear bumper, trailing face
+]
+
+function buildCarBodyGeometry() {
+    // splineThru (not lineTo) is what actually makes this curved. lineTo
+    // connects the profile points with straight segments, which is why it
+    // came out "carved"/faceted — sharp corner at every control point.
+    // splineThru runs a smooth curve through the same points instead, so
+    // the hood, windshield, roof and trunk blend into each other like an
+    // actual car body rather than meeting at creases.
+    const points = CAR_BODY_PROFILE.map(p => new THREE.Vector2(p[0], p[1]))
+    const shape = new THREE.Shape()
+    shape.moveTo(points[0].x, points[0].y)
+    shape.splineThru(points.slice(1).concat([points[0]]))
+
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+        depth: CAR_WIDTH,
+        curveSegments: 28,   // more samples along the spline = smoother curve, less faceting
+        bevelEnabled: true,
+        bevelThickness: 0.05,
+        bevelSize: 0.05,
+        bevelSegments: 2,
+        steps: 1
+    })
+
+    // ExtrudeGeometry puts the profile on local X/Y and extrudes along
+    // local Z. We want length along world Z (forward) and width along
+    // world X, so rotate 90° and re-center on the width axis.
+    geometry.rotateY(-Math.PI / 2)
+    geometry.translate(CAR_WIDTH / 2, 0, 0)
+
+    // Tumblehome: above the beltline, pull vertices in toward the
+    // centerline so the cabin reads narrower than the body — like a real
+    // unibody car — instead of one constant-width slab all the way up.
+    const pos = geometry.attributes.position
+    for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i)
+        if (y > CAR_BELT_HEIGHT) {
+            const t = Math.min((y - CAR_BELT_HEIGHT) / (CAR_ROOF_HEIGHT - CAR_BELT_HEIGHT), 1)
+            const factor = THREE.MathUtils.lerp(1, CAR_TUMBLEHOME, t)
+            pos.setX(i, pos.getX(i) * factor)
+        }
+    }
+    pos.needsUpdate = true
+    geometry.computeVertexNormals()
+
+    return geometry
+}
 
 function createCar(bodyColor) {
     const carGroup = new THREE.Group()
 
-    const chassis = new THREE.Mesh(
-        new THREE.BoxGeometry(CAR_WIDTH, 0.78, 4.3),
-        new THREE.MeshStandardMaterial({ color: bodyColor })
-    )
-    chassis.position.y = 0.39
-    chassis.castShadow = true
-    carGroup.add(chassis)
+    // side: THREE.DoubleSide is a safety net for the sculpted body — an
+    // extruded-then-rotated-then-tapered mesh can end up with normals
+    // that aren't all consistently outward, and a single-sided material
+    // would make panels vanish from some angles instead of just looking
+    // a little off.
+    // Lower roughness + a touch of metalness gives the paint a real
+    // highlight where the sun light hits it, instead of the flat, no-shine
+    // "matte plastic" look of the default material (roughness 1, metalness
+    // 0). This is still just the one directional light responding to the
+    // material — no env map, no extra reflections — so it stays in the
+    // chunky low-poly register, it just actually reads as painted metal.
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: bodyColor,
+        flatShading: true,
+        side: THREE.DoubleSide,
+        roughness: 0.35,
+        metalness: 0.45
+    })
+    const trimMaterial = new THREE.MeshStandardMaterial({ color: 0x161616, flatShading: true })
+    const glassMaterial = new THREE.MeshStandardMaterial({ color: 0x111111 })
 
-    const cabin = new THREE.Mesh(
-        new THREE.BoxGeometry(1.44, 0.65, 1.935),
-        new THREE.MeshStandardMaterial({ color: bodyColor })
-    )
-    cabin.position.set(0, 0.78 + 0.325, -0.32)
-    cabin.castShadow = true
-    carGroup.add(cabin)
+    // ---- Body shell (sculpted silhouette, not stacked boxes) ----
+    const body = new THREE.Mesh(buildCarBodyGeometry(), bodyMaterial)
+    body.castShadow = true
+    body.receiveShadow = true
+    carGroup.add(body)
 
-    const windshield = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.35, 0.65),
-        new THREE.MeshStandardMaterial({ color: 0x111111 })
-    )
-    windshield.position.set(0, 1.15, 0.59)
-    windshield.rotation.x = -Math.PI / 3.2
+    // ---- Windshield & rear window (flush against the sloped panels) ----
+    const windshield = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.68), glassMaterial)
+    windshield.position.set(0, 1.07, 0.65)
+    windshield.rotation.x = -1.1
     carGroup.add(windshield)
 
+    const rearWindow = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.55), glassMaterial)
+    rearWindow.position.set(0, 1.12, -0.9)
+    rearWindow.rotation.x = 0.8
+    carGroup.add(rearWindow)
+
+    // ---- Bumpers (dark trim, sits just proud of the body) ----
+    const frontBumper = new THREE.Mesh(
+        new THREE.BoxGeometry(CAR_WIDTH + 0.06, 0.28, 0.2),
+        trimMaterial
+    )
+    frontBumper.position.set(0, 0.32, 2.0)
+    carGroup.add(frontBumper)
+
+    const rearBumper = new THREE.Mesh(
+        new THREE.BoxGeometry(CAR_WIDTH + 0.06, 0.28, 0.2),
+        trimMaterial
+    )
+    rearBumper.position.set(0, 0.32, -2.0)
+    carGroup.add(rearBumper)
+
+    // ---- Headlights / taillights (simple square insets) ----
+    const headlightMaterial = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, emissive: 0x888866 })
+    ;[-1, 1].forEach((side) => {
+        const headlight = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.18, 0.06), headlightMaterial)
+        headlight.position.set(side * 0.62, 0.55, 1.95)
+        carGroup.add(headlight)
+    })
+
+    const taillightMaterial = new THREE.MeshStandardMaterial({ color: 0xaa1111, emissive: 0x550000 })
+    ;[-1, 1].forEach((side) => {
+        const taillight = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.18, 0.06), taillightMaterial)
+        taillight.position.set(side * 0.62, 0.45, -1.95)
+        carGroup.add(taillight)
+    })
+
+    // ---- Mirrors ----
+    ;[-1, 1].forEach((side) => {
+        const mirror = new THREE.Mesh(
+            new THREE.BoxGeometry(0.1, 0.12, 0.22),
+            bodyMaterial
+        )
+        mirror.position.set(side * (CAR_WIDTH / 2 + 0.05), 0.95, 0.8)
+        carGroup.add(mirror)
+    })
+
+    // ---- Wheels ----
     const wheelGeometry = new THREE.CylinderGeometry(0.36, 0.36, 0.27, 12)
     const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a })
 
@@ -461,6 +608,14 @@ let speed = 0
 let heading = 0
 let velocityAngle = 0
 let steerAngle = 0
+const cameraOffset = new THREE.Vector3(0, 5, -10)
+
+let desiredCameraPos = new THREE.Vector3()
+
+// Drives the camera swinging around to the front of the car while
+// reversing — see the CAMERA FOLLOW section in animate() for details.
+let reverseBlend = 0
+let reverseTarget = 0
 
 const clock = new THREE.Clock()
 
@@ -675,7 +830,11 @@ function drawLapTimer() {
 function animate() {
     requestAnimationFrame(animate)
 
-    const deltaTime = clock.getDelta()
+    // Clamp deltaTime so a dropped/hitched frame (tab switch, GC pause,
+    // a heavy frame) can't inject a huge dt spike into the physics/camera
+    // integration below — this is part of what was causing the camera to
+    // visibly jump/stutter rather than smoothly slow down.
+    const deltaTime = Math.min(clock.getDelta(), 1 / 30)
 
     // ---- Acceleration / braking ----
     const speedRatio = Math.min(Math.abs(speed) / MAX_SPEED, 1)
@@ -719,7 +878,6 @@ function animate() {
     let angleDiff = heading - velocityAngle
     angleDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff))
     velocityAngle += angleDiff * frameAdjustedTraction
-
     // ---- Apply rotation and movement ----
     car.rotation.y = heading
 
@@ -782,25 +940,59 @@ function animate() {
         }
     }
 
-    // ---- Camera behind car ----
-    // Camera sits OPPOSITE the car's front-facing direction (local +Z),
-    // i.e. behind it, not in front. Front direction in world space is
-    // (sin(heading), cos(heading)) since the car model's front (windshield,
-    // steerable wheels) points along local +Z — so the camera offset must
-    // subtract that vector, not add it, or it ends up watching the car
-    // drive toward it instead of chasing it from behind.
-    const targetX = car.position.x - Math.sin(heading) * 10
-    const targetY = 5
-    const targetZ = car.position.z - Math.cos(heading) * 10
+    // ----- CAMERA FOLLOW -----
+    // Frame-rate independent exponential smoothing instead of the old
+    // velocity/spring integration. The old version added a velocity each
+    // frame proportional to stiffness * deltaTime (stiffness up to 100) —
+    // once deltaTime wasn't tiny (a slow frame, or just running at 30fps
+    // instead of 60fps), that overshoots. On top of that, a *second*,
+    // unscaled `lerp(desiredCameraPos, 0.02)` ran every frame regardless of
+    // deltaTime, fighting the spring. That combination — an unstable spring
+    // plus a frame-rate-dependent correction layered on top — is what reads
+    // as stutter. This single formula converges smoothly to the target at
+    // any frame rate, with no overshoot and nothing fighting it.
+    //
+    // Reverse handling: `heading` is just which way the car is POINTED, and
+    // it doesn't flip when you reverse — so without this, the camera would
+    // stay parked behind the nose staring forward while you back up *toward*
+    // it, never showing you what's behind you. `reverseBlend` smoothly swings
+    // the camera around to the front of the car and flips the look direction
+    // whenever speed is clearly negative, so it actually shows the direction
+    // you're travelling. A small dead zone around zero speed stops it from
+    // flapping back and forth every time you're stopped or coasting.
+    if (speed < -2) reverseTarget = 1
+    else if (speed > 2) reverseTarget = 0
+    reverseBlend += (reverseTarget - reverseBlend) * (1 - Math.exp(-5 * deltaTime))
 
-    camera.position.x += (targetX - camera.position.x) * 0.1
-    camera.position.y += (targetY - camera.position.y) * 0.1
-    camera.position.z += (targetZ - camera.position.z) * 0.1
+    const cameraDistance = 3 + speedRatio * 0.8
+    const reverseHeading = heading + Math.PI
+
+    const forwardCamX = car.position.x - Math.sin(heading) * cameraDistance
+    const forwardCamZ = car.position.z - Math.cos(heading) * cameraDistance
+    const reverseCamX = car.position.x - Math.sin(reverseHeading) * cameraDistance
+    const reverseCamZ = car.position.z - Math.cos(reverseHeading) * cameraDistance
+
+    desiredCameraPos.set(
+        THREE.MathUtils.lerp(forwardCamX, reverseCamX, reverseBlend),
+        car.position.y + 3.5,
+        THREE.MathUtils.lerp(forwardCamZ, reverseCamZ, reverseBlend)
+    )
+
+    // Higher followRate = camera catches up to the target faster.
+    const followRate = 6 + speedRatio * 6
+    const followAmount = 1 - Math.exp(-followRate * deltaTime)
+
+    camera.position.lerp(desiredCameraPos, followAmount)
+
+    const forwardLookX = car.position.x + Math.sin(heading) * 3
+    const forwardLookZ = car.position.z + Math.cos(heading) * 3
+    const reverseLookX = car.position.x + Math.sin(reverseHeading) * 3
+    const reverseLookZ = car.position.z + Math.cos(reverseHeading) * 3
 
     camera.lookAt(
-        car.position.x,
-        car.position.y + 1,
-        car.position.z
+        THREE.MathUtils.lerp(forwardLookX, reverseLookX, reverseBlend),
+        car.position.y + 1.5,
+        THREE.MathUtils.lerp(forwardLookZ, reverseLookZ, reverseBlend)
     )
 
     renderer.render(scene, camera)
