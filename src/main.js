@@ -49,6 +49,19 @@ const trackCurve = new THREE.CatmullRomCurve3(trackControlPoints, true, 'catmull
 const TRACK_SAMPLE_COUNT = 900
 const rawTrackPoints = trackCurve.getPoints(TRACK_SAMPLE_COUNT)
 const trackPoints = rawTrackPoints.slice(0, -1)
+// ===== Invisible checkpoints =====
+const checkpoints = [
+    trackPoints[0],
+    trackPoints[Math.floor(trackPoints.length * 0.125)],
+    trackPoints[Math.floor(trackPoints.length * 0.25)],
+    trackPoints[Math.floor(trackPoints.length * 0.375)],
+    trackPoints[Math.floor(trackPoints.length * 0.5)],
+    trackPoints[Math.floor(trackPoints.length * 0.625)],
+    trackPoints[Math.floor(trackPoints.length * 0.75)],
+    trackPoints[Math.floor(trackPoints.length * 0.875)]
+]
+
+const CHECKPOINT_RADIUS = 30
 
 // ===== Ground =====
 const trackBoundsMinX = Math.min(...trackControlPoints.map(p => p.x))
@@ -643,10 +656,12 @@ const MAX_LATERAL_GRIP = 12 // m/s² (~1.2g) — caps how sharply the car can tu
 // ===== LAP TIMING SYSTEM =====
 let currentLapTime = 0
 let bestLapTime = Infinity
+let previousLapTime = Infinity
 let lapCount = 0
 let lapTimes = []
 let lastCrossTime = -1
 let hasStartedRacing = false
+let checkpointIndex = 0
 let lastFinishLineZ = null
 
 // Finish line boundaries for lap detection
@@ -820,11 +835,38 @@ function drawLapTimer() {
     ctx.fillText(formatTime(currentLapTime), lapTimerCanvas.width - padding, y)
     y += 20
     
-    // Best lap time
-    ctx.fillStyle = bestLapTime !== Infinity ? '#00ff00' : '#666666'
-    ctx.fillText('Best:    ', padding, y)
-    ctx.textAlign = 'right'
-    ctx.fillText(formatTime(bestLapTime), lapTimerCanvas.width - padding, y)
+    // Previous lap
+ctx.fillStyle = previousLapTime !== Infinity ? '#ffffff' : '#666666'
+ctx.textAlign = 'left'
+ctx.fillText('Previous:', padding, y)
+
+ctx.textAlign = 'right'
+ctx.fillText(formatTime(previousLapTime), lapTimerCanvas.width - padding, y)
+
+y += 20
+
+// Best lap
+ctx.fillStyle = bestLapTime !== Infinity ? '#00ff00' : '#666666'
+ctx.textAlign = 'left'
+ctx.fillText('Best:', padding, y)
+
+ctx.textAlign = 'right'
+ctx.fillText(formatTime(bestLapTime), lapTimerCanvas.width - padding, y)
+}
+
+function checkCheckpoint() {
+    if (checkpointIndex >= checkpoints.length) return
+
+    const cp = checkpoints[checkpointIndex]
+
+    if (car.position.distanceTo(cp) < CHECKPOINT_RADIUS) {
+
+        checkpointIndex++
+
+        if (checkpointIndex >= checkpoints.length) {
+            checkpointIndex = checkpoints.length
+        }
+    }
 }
 
 function animate() {
@@ -918,9 +960,17 @@ function animate() {
     }
 
     // Check for lap crossing
+    checkCheckpoint()
     const onFinishLine = checkLapCrossing()
     
-    if (onFinishLine && Math.abs(speed) > 2) { // Must be moving reasonably fast
+    if (
+    onFinishLine &&
+    Math.abs(speed) > 2 &&
+    (
+        !hasStartedRacing ||
+        checkpointIndex === checkpoints.length
+    )
+) { // Must be moving reasonably fast
         if (lastCrossTime === -1 || clock.getElapsedTime() - lastCrossTime > 5) { // Prevent double-counting (5 second buffer)
             if (hasStartedRacing) {
                 // Completed a lap
@@ -928,12 +978,15 @@ function animate() {
                 if (currentLapTime < bestLapTime) {
                     bestLapTime = currentLapTime
                 }
+                previousLapTime = currentLapTime
                 lapTimes.push(currentLapTime)
                 console.log(`LAP ${lapCount} COMPLETE: ${formatTime(currentLapTime)}`)
                 currentLapTime = 0
+                checkpointIndex = 0
             } else {
                 // First crossing - start the race
                 hasStartedRacing = true
+                checkpointIndex = 0
                 console.log('RACE STARTED!')
             }
             lastCrossTime = clock.getElapsedTime()
