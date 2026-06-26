@@ -10,7 +10,6 @@ const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerH
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.setSize(window.innerWidth, window.innerHeight)
 document.body.appendChild(renderer.domElement)
-
 // Slightly reduced from 3.0 so metallic paint doesn't blow out to solid white
 const sun = new THREE.DirectionalLight(0xffffff, 2.4)
 sun.position.set(20, 30, 20)
@@ -606,7 +605,12 @@ function checkLapCrossing() {
 // ===== Speedometer HUD =====
 const speedoCvs = document.createElement('canvas')
 speedoCvs.width = speedoCvs.height = 200
-Object.assign(speedoCvs.style, { position:'fixed', right:'20px', bottom:'20px', pointerEvents:'none', filter:'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' })
+Object.assign(speedoCvs.style, {
+    position: 'fixed',
+    right: '20px',
+    bottom: '20px',
+    pointerEvents: 'none',
+    zIndex: '100', filter:'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' })
 document.body.appendChild(speedoCvs)
 const speedoCtx = speedoCvs.getContext('2d')
 const SPEEDO_MAX_KMH = Math.ceil((MAX_SPEED * 3.6) / 40) * 40
@@ -641,7 +645,12 @@ function drawSpeedometer(spd) {
 // ===== Lap timer HUD =====
 const lapCvs = document.createElement('canvas')
 lapCvs.width = 250; lapCvs.height = 162
-Object.assign(lapCvs.style, { position:'fixed', left:'20px', top:'20px', pointerEvents:'none', filter:'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' })
+Object.assign(lapCvs.style, {
+    position: 'fixed',
+    left: '20px',
+    top: '20px',
+    pointerEvents: 'none',
+    zIndex: '100', filter:'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' })
 document.body.appendChild(lapCvs)
 const lapCtx = lapCvs.getContext('2d')
 
@@ -774,6 +783,7 @@ window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight
     camera.updateProjectionMatrix()
     renderer.setSize(window.innerWidth, window.innerHeight)
+   
 })
 
 window.getLapTimes = () => lapTimes
